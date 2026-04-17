@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+dist/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Environment
+.env
+.env.local
+*.pem
+
+# CDK
+infra/cdk.out/
+infra/.cdk.staging/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

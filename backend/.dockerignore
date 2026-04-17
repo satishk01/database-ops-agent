@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+.env
+.env.*
+.venv
+venv
+*.egg-info
+.git
+.gitignore
+seed_demo_db.py
+agentcore_deploy.py
+Dockerfile.agentcore

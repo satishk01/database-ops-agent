@@ -1,0 +1,10 @@
+strands-agents>=1.0.0
+strands-agents-tools>=0.2.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+psycopg2-binary>=2.9.9
+boto3>=1.35.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+sse-starlette>=2.0.0
+mangum>=0.19.0
