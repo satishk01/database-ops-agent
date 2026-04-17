@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import {
   Database,
@@ -24,6 +24,7 @@ interface Message {
   agentType: AgentType;
   toolsUsed?: string[];
   timestamp: Date;
+  isStreaming?: boolean;
 }
 
 const AGENT_INFO: Record<AgentType, { label: string; icon: React.ReactNode; color: string; desc: string }> = {
@@ -56,19 +57,38 @@ const QUICK_PROMPTS = [
   { label: "Active Sessions", prompt: "Show me active sessions and wait events to identify what's blocking queries", agent: "healthcheck" as AgentType },
 ];
 
+/** Parse SSE lines from a text chunk. Handles partial lines across chunks. */
+function parseSSEChunk(text: string): Array<{ type: string; content?: string; tool?: string; final_response?: string; tools_used?: string[]; message?: string }> {
+  const events: Array<any> = [];
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("data: ")) {
+      try {
+        const payload = JSON.parse(trimmed.slice(6));
+        events.push(payload);
+      } catch {
+        // partial JSON, skip
+      }
+    }
+  }
+  return events;
+}
+
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [agentType, setAgentType] = useState<AgentType>("supervisor");
   const [loading, setLoading] = useState(false);
+  const [activeTools, setActiveTools] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const sendMessage = async (text?: string, overrideAgent?: AgentType) => {
+  const sendMessage = useCallback(async (text?: string, overrideAgent?: AgentType) => {
     const msg = text || input.trim();
     const agent = overrideAgent || agentType;
     if (!msg || loading) return;
@@ -80,51 +100,139 @@ export default function App() {
       agentType: agent,
       timestamp: new Date(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+
+    const assistantId = crypto.randomUUID();
+    const assistantMsg: Message = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      agentType: agent,
+      toolsUsed: [],
+      timestamp: new Date(),
+      isStreaming: true,
+    };
+
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setInput("");
     setLoading(true);
+    setActiveTools([]);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: msg, agent_type: agent }),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: "Request failed" }));
-        throw new Error(err.detail || "Request failed");
+        const err = await res.text();
+        throw new Error(err || `HTTP ${res.status}`);
       }
 
-      const data = await res.json();
-      const assistantMsg: Message = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: data.response,
-        agentType: agent,
-        toolsUsed: data.tools_used,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No response body");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamedContent = "";
+      const toolsList: string[] = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE lines
+        const events = parseSSEChunk(buffer);
+        // Keep only the last incomplete line in buffer
+        const lastNewline = buffer.lastIndexOf("\n");
+        buffer = lastNewline >= 0 ? buffer.slice(lastNewline + 1) : buffer;
+
+        for (const evt of events) {
+          if (evt.type === "text" && evt.content) {
+            streamedContent += evt.content;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: streamedContent }
+                  : m
+              )
+            );
+          } else if (evt.type === "tool" && evt.tool) {
+            if (!toolsList.includes(evt.tool)) {
+              toolsList.push(evt.tool);
+              setActiveTools([...toolsList]);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? { ...m, toolsUsed: [...toolsList] }
+                    : m
+                )
+              );
+            }
+          } else if (evt.type === "done") {
+            // Use final_response if available (sanitized by guardrails)
+            const finalContent = evt.final_response || streamedContent;
+            const finalTools = evt.tools_used || toolsList;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: finalContent, toolsUsed: finalTools, isStreaming: false }
+                  : m
+              )
+            );
+          } else if (evt.type === "error") {
+            const errContent = `⚠️ ${evt.content || evt.message || "Unknown error"}`;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: errContent, isStreaming: false }
+                  : m
+              )
+            );
+          }
+        }
+      }
+
+      // If stream ended without a done event, finalize
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId && m.isStreaming
+            ? { ...m, isStreaming: false }
+            : m
+        )
+      );
     } catch (err: any) {
-      const errorMsg: Message = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: `⚠️ Error: ${err.message}`,
-        agentType: agent,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMsg]);
+      if (err.name === "AbortError") return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: `⚠️ Error: ${err.message}`, isStreaming: false }
+            : m
+        )
+      );
     } finally {
       setLoading(false);
+      setActiveTools([]);
+      abortRef.current = null;
     }
-  };
+  }, [input, agentType, loading]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
+  };
+
+  const handleStop = () => {
+    abortRef.current?.abort();
+    setLoading(false);
   };
 
   return (
@@ -245,10 +353,17 @@ export default function App() {
                     <span className="message-time">
                       {msg.timestamp.toLocaleTimeString()}
                     </span>
+                    {msg.isStreaming && (
+                      <span className="streaming-badge">streaming</span>
+                    )}
                   </div>
                   <div className="message-content">
                     {msg.role === "assistant" ? (
-                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                      msg.content ? (
+                        <ReactMarkdown>{msg.content}</ReactMarkdown>
+                      ) : msg.isStreaming ? (
+                        <span className="thinking">Thinking...</span>
+                      ) : null
                     ) : (
                       <p>{msg.content}</p>
                     )}
@@ -262,29 +377,12 @@ export default function App() {
                 </div>
               </div>
             ))}
-
-            {loading && (
-              <div className="message assistant">
-                <div className="message-avatar">
-                  <Loader2 size={20} className="spin" />
-                </div>
-                <div className="message-body">
-                  <div className="loading-indicator">
-                    <span>Agent is analyzing</span>
-                    <span className="dots">
-                      <span>.</span><span>.</span><span>.</span>
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
             <div ref={messagesEndRef} />
           </div>
 
           <div className="input-area">
             <div className="input-wrapper">
               <textarea
-                ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
@@ -292,18 +390,27 @@ export default function App() {
                 rows={1}
                 disabled={loading}
               />
-              <button
-                className="send-btn"
-                onClick={() => sendMessage()}
-                disabled={!input.trim() || loading}
-                aria-label="Send message"
-              >
-                {loading ? <Loader2 size={20} className="spin" /> : <Send size={20} />}
-              </button>
+              {loading ? (
+                <button className="stop-btn" onClick={handleStop} aria-label="Stop">
+                  <span className="stop-icon" />
+                </button>
+              ) : (
+                <button
+                  className="send-btn"
+                  onClick={() => sendMessage()}
+                  disabled={!input.trim()}
+                  aria-label="Send message"
+                >
+                  <Send size={20} />
+                </button>
+              )}
             </div>
             <p className="input-hint">
               Press Enter to send · Shift+Enter for new line ·
               Active: <span style={{ color: AGENT_INFO[agentType].color }}>{AGENT_INFO[agentType].label}</span>
+              {activeTools.length > 0 && (
+                <span className="active-tool-hint"> · Using: {activeTools[activeTools.length - 1]}</span>
+              )}
             </p>
           </div>
         </main>

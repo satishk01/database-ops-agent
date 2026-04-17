@@ -438,3 +438,53 @@
   .header-badges { display: none; }
   .message { max-width: 95%; }
 }
+
+
+/* Streaming badge */
+.streaming-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(108, 99, 255, 0.2);
+  color: var(--accent);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.thinking {
+  color: var(--text-muted);
+  font-style: italic;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+/* Stop button */
+.stop-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--danger);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.stop-btn:hover {
+  background: #ef4444;
+}
+.stop-icon {
+  width: 12px;
+  height: 12px;
+  background: white;
+  border-radius: 2px;
+}
+
+/* Active tool hint */
+.active-tool-hint {
+  color: var(--accent);
+}

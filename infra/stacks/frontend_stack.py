@@ -42,9 +42,13 @@ class FrontendStack(Stack):
             signing=cloudfront.Signing.SIGV4_NO_OVERRIDE,
         )
 
-        # API origin (strip /api prefix, forward to API Gateway)
+        # API origin — REST API with /prod stage prefix
+        # REST API URL: https://{id}.execute-api.{region}.amazonaws.com/prod/
+        api_domain = cdk.Fn.select(2, cdk.Fn.split("/", api_url))
+
         api_origin = origins.HttpOrigin(
-            cdk.Fn.select(2, cdk.Fn.split("/", api_url)),
+            api_domain,
+            origin_path="/prod",
             protocol_policy=cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
         )
 
